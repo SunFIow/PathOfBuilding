@@ -33,3 +33,7 @@ src/Export/ggpk/*.dll
 
 # Timeless Jewels
 src/Data/TimelessJewelData/*.bin
+
+
+# Custom
+src/profiler.log

@@ -26,9 +26,23 @@ local ConfigTabClass = newClass("ConfigTab", "UndoHandler", "ControlHost", "Cont
 
 	self.sectionList = { }
 	self.varControls = { }
-	
+
 	self:BuildModList()
 
+	-- Set selector
+	self.controls.setSelect = new("DropDownControl", {"TOPLEFT",self,"TOPLEFT"}, 86, -20, 210, 20, nil, function(index, value)
+		self:SetActiveConfigSet(self.configSetOrderList[index])
+		self:AddUndoState()
+	end)
+	self.controls.setSelect.enableDroppedWidth = true
+	self.controls.setSelect.enabled = function()
+		return #self.configSetOrderList > 1
+	end
+	self.controls.setLabel = new("LabelControl", {"RIGHT",self.controls.setSelect,"LEFT"}, -2, 0, 0, 16, "^7Config set:")
+	self.controls.setManage = new("ButtonControl", {"LEFT",self.controls.setSelect,"RIGHT"}, 4, 0, 90, 20, "Manage...", function()
+		self:OpenConfigSetManagePopup()
+	end)
+	
 	local function implyCond(varData)
 		local mainEnv = self.build.calcsTab.mainEnv
 		if self.input[varData.var] then
@@ -513,9 +527,18 @@ local ConfigTabClass = newClass("ConfigTab", "UndoHandler", "ControlHost", "Cont
 		end
 	end
 	self.controls.scrollBar = new("ScrollBarControl", {"TOPRIGHT",self,"TOPRIGHT"}, 0, 0, 18, 0, 50, "VERTICAL", true)
+	
+	-- Initialise Config sets
+	self.configSets = { }
+	self.configSetOrderList = { 1 }
+	self:NewConfigSet(1)
+	self:SetActiveConfigSet(1)
 end)
 
 function ConfigTabClass:Load(xml, fileName)
+	self.activeConfigSetId = 0
+	self.configSets = { }
+	self.configSetOrderList = { }
 	for _, node in ipairs(xml) do
 		if node.elem == "Input" then
 			if not node.attrib.name then
@@ -552,12 +575,61 @@ function ConfigTabClass:Load(xml, fileName)
 			else
 				launch:ShowErrMsg("^1Error parsing '%s': 'Placeholder' element missing number", fileName)
 				return true
+			end		
+		elseif node.elem == "ConfigSet" then
+			local configSet = self:NewConfigSet(tonumber(node.attrib.id))
+			configSet.title = node.attrib.title
+			t_insert(self.configSetOrderList, configSet.id)
+			for _, child in ipairs(node) do
+				self:LoadConfigSet(child, configSet.id)
 			end
 		end
 	end
+	self:SetActiveConfigSet(tonumber(xml.attrib.activeConfigSet) or 1)
 	self:BuildModList()
 	self:UpdateControls()
 	self:ResetUndo()
+end
+
+function ConfigTabClass:LoadConfigSet(node, configSetId)
+	local configSet = self.configSets[configSetId]
+	if node.elem == "Input" then
+		if not node.attrib.name then
+			launch:ShowErrMsg("^1Error parsing '%s': 'Input' element missing name attribute", fileName)
+			return true
+		end
+		if node.attrib.number then
+			configSet.input[node.attrib.name] = tonumber(node.attrib.number)
+		elseif node.attrib.string then
+			if node.attrib.name == "enemyIsBoss" then
+				configSet.input[node.attrib.name] = node.attrib.string:lower():gsub("(%l)(%w*)", function(a,b) return s_upper(a)..b end)
+				:gsub("Uber Atziri", "Boss"):gsub("Shaper", "Pinnacle"):gsub("Sirus", "Pinnacle")
+			-- backwards compat <=3.20, Uber Atziri Flameblast -> Atziri Flameblast
+			elseif node.attrib.name == "presetBossSkills" then
+				configSet.input[node.attrib.name] = node.attrib.string:gsub("^Uber ", "")
+			else
+				configSet.input[node.attrib.name] = node.attrib.string
+			end
+		elseif node.attrib.boolean then
+			configSet.input[node.attrib.name] = node.attrib.boolean == "true"
+		else
+			launch:ShowErrMsg("^1Error parsing '%s': 'Input' element missing number, string or boolean attribute", fileName)
+			return true
+		end
+	elseif node.elem == "Placeholder" then
+		if not node.attrib.name then
+			launch:ShowErrMsg("^1Error parsing '%s': 'Placeholder' element missing name attribute", fileName)
+			return true
+		end
+		if node.attrib.number then
+			configSet.placeholder[node.attrib.name] = tonumber(node.attrib.number)
+		elseif node.attrib.string then
+			configSet.input[node.attrib.name] = node.attrib.string
+		else
+			launch:ShowErrMsg("^1Error parsing '%s': 'Placeholder' element missing number", fileName)
+			return true
+		end		
+	end			
 end
 
 function ConfigTabClass:GetDefaultState(var, varType)
@@ -580,7 +652,60 @@ function ConfigTabClass:GetDefaultState(var, varType)
 	end
 end
 
+function ConfigTabClass:GetDefaultStateForConfigSet(configSetId, var, varType)
+	local configSet = self.configSets[configSetId]
+	if configSet.placeholder[var] ~= nil then
+		return configSet.placeholder[var]
+	end
+
+	if self.defaultState[var] ~= nil then
+		return self.defaultState[var]
+	end
+
+	if varType == "number" then
+		return 0
+	elseif varType == "boolean" then
+		return false
+	elseif varType == "string" then
+		return ""
+	else
+		return nil
+	end
+end
+
 function ConfigTabClass:Save(xml)
+	xml.attrib = {
+		activeConfigSet = tostring(self.activeConfigSetId)
+	}
+
+	for _, configSetId in ipairs(self.configSetOrderList) do
+		local configSet = self.configSets[configSetId]
+		local child = { elem = "ConfigSet", attrib = { id = tostring(configSetId), title = configSet.title } }
+		t_insert(xml, child)
+		for name, value in pairs(configSet.input) do
+			if value ~= self:GetDefaultStateForConfigSet(configSetId, name, type(value)) then
+				local childInput = { elem = "Input", attrib = { name = name } }
+				if type(value) == "number" then
+					childInput.attrib.number = tostring(value)
+				elseif type(value) == "boolean" then
+					childInput.attrib.boolean = tostring(value)
+				else
+					childInput.attrib.string = tostring(value)
+				end
+				t_insert(child, childInput)
+			end
+		end
+		for name, value in pairs(configSet.placeholder) do
+			local childPH = { elem = "Placeholder", attrib = { name = name } }
+			if type(value) == "number" then
+				childPH.attrib.number = tostring(value)
+			else
+				childPH.attrib.string = tostring(value)
+			end
+			t_insert(child, childPH)
+		end
+	end
+
 	for k, v in pairs(self.input) do
 		if v ~= self:GetDefaultState(k, type(v)) then
 			local child = { elem = "Input", attrib = { name = k } }
@@ -621,8 +746,9 @@ function ConfigTabClass:UpdateControls()
 end
 
 function ConfigTabClass:Draw(viewPort, inputEvents)
+	local CONFIG_SET_Y_OFFSET = 30
 	self.x = viewPort.x
-	self.y = viewPort.y
+	self.y = viewPort.y + CONFIG_SET_Y_OFFSET
 	self.width = viewPort.width
 	self.height = viewPort.height
 
@@ -669,7 +795,7 @@ function ConfigTabClass:Draw(viewPort, inputEvents)
 		if doShow then
 			local width, height = section:GetSize()
 			local col
-			if section.col and (colY[section.col] or 0) + height + 28 <= viewPort.height and 10 + section.col * 370 <= viewPort.width then
+			if section.col and (colY[section.col] or 0) + height + 28 <= (viewPort.height - CONFIG_SET_Y_OFFSET) and 10 + section.col * 370 <= (viewPort.width - CONFIG_SET_Y_OFFSET) then
 				col = section.col
 			else
 				col = 1
@@ -695,6 +821,16 @@ function ConfigTabClass:Draw(viewPort, inputEvents)
 	end
 
 	main:DrawBackground(viewPort)
+
+	local newConfigList = { }
+	for index, configSetId in ipairs(self.configSetOrderList) do
+		local configSet = self.configSets[configSetId]
+		t_insert(newConfigList, configSet.title or "Default")
+		if configSetId == self.activeConfigSetId then
+			self.controls.setSelect.selIndex = index
+		end
+	end
+	self.controls.setSelect:SetList(newConfigList)
 
 	self:DrawControls(viewPort)
 end
@@ -782,7 +918,26 @@ function ConfigTabClass:ImportCalcSettings()
 end
 
 function ConfigTabClass:CreateUndoState()
-	return copyTable(self.input)
+	local state = copyTable(self.input)
+	-- local state = { }
+	state.activeConfigSetId = self.activeConfigSetId
+	state.configSets = { }
+	for configSetIndex, configSet in pairs(self.configSets) do
+		local newConfigSet = copyTable(configSet, true)
+		newConfigSet.input = { }
+		for inputIndex, input in pairs(configSet.input) do
+			local newInput = copyTable(input, true)
+			newConfigSet.input[inputIndex] = newInput
+		end
+		newConfigSet.placeholder = { }
+		for placeholderIndex, placeholder in pairs(configSet.placeholder) do
+			local newInput = copyTable(placeholder, true)
+			newConfigSet.input[placeholderIndex] = newInput
+		end
+		state.configSets[configSetIndex] = newConfigSet
+	end
+	state.configSetOrderList = copyTable(self.configSetOrderList)
+	return state
 end
 
 function ConfigTabClass:RestoreUndoState(state)
@@ -790,6 +945,59 @@ function ConfigTabClass:RestoreUndoState(state)
 	for k, v in pairs(state) do
 		self.input[k] = v
 	end
+
+	wipeTable(self.configSets)
+	for k, v in pairs(state.configSets) do
+		self.configSets[k] = v
+	end
+	wipeTable(self.configSetOrderList)
+	for k, v in ipairs(state.configSetOrderList) do
+		self.configSetOrderList[k] = v
+	end
+	self:SetActiveConfigSet(state.activeConfigSetId)
 	self:UpdateControls()
 	self:BuildModList()
+end
+
+-- Opens the config set manager
+function ConfigTabClass:OpenConfigSetManagePopup()
+	main:OpenPopup(370, 290, "Manage Config Sets", {
+		new("ConfigSetListControl", nil, 0, 50, 350, 200, self),
+		new("ButtonControl", nil, 0, 260, 90, 20, "Done", function()
+			main:ClosePopup()
+		end),
+	})
+end
+
+-- Creates a new config set
+function ConfigTabClass:NewConfigSet(configSetId)
+	local configSet = { id = configSetId, input = {}, placeholder = {} }
+	if not configSetId then
+		configSet.id = 1
+		while self.configSets[configSet.id] do
+			configSet.id = configSet.id + 1
+		end
+	end
+	self.configSets[configSet.id] = configSet
+	return configSet
+end
+
+-- Changes the active config set
+function ConfigTabClass:SetActiveConfigSet(configSetId)
+	-- Initialize config sets if needed
+	if not self.configSetOrderList[1] then
+		self.configSetOrderList[1] = 1
+		self:NewConfigSet(1)
+	end
+
+	if not configSetId then
+		configSetId = self.activeConfigSetId
+	end
+
+	if not self.configSets[configSetId] then
+		configSetId = self.configSetOrderList[1]
+	end
+
+	self.activeConfigSetId = configSetId
+	self.build.buildFlag = true
 end
